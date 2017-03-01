@@ -1,44 +1,27 @@
 package com.Joedobo27.defaultItemtemplate;
 
 
-import com.sun.istack.internal.Nullable;
 import com.wurmonline.server.DbConnector;
 import com.wurmonline.server.MiscConstants;
 import com.wurmonline.server.items.ItemTemplate;
 import com.wurmonline.server.items.ItemTemplateFactory;
 import com.wurmonline.server.utils.DbUtilities;
 import org.gotti.wurmunlimited.modloader.ReflectionUtil;
-import org.gotti.wurmunlimited.modloader.interfaces.Configurable;
 import org.gotti.wurmunlimited.modloader.interfaces.ItemTemplatesCreatedListener;
 import org.gotti.wurmunlimited.modloader.interfaces.WurmServerMod;
 
 import java.io.IOException;
 import java.sql.*;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Map;
-import java.util.Properties;
+import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-public class DefaultItemTemplateMod implements WurmServerMod, Configurable, ItemTemplatesCreatedListener {
+public class DefaultItemTemplateMod implements WurmServerMod, ItemTemplatesCreatedListener {
 
-    private static int[] convertToDefault;
-    private static DefaultItemTemplateMod instance;
+    private static final Logger logger;
 
-    private static final Logger logger = Logger.getLogger(DefaultItemTemplateMod.class.getName());
-
-    private static DefaultItemTemplateMod getInstance() {
-        if (DefaultItemTemplateMod.instance == null) {
-            DefaultItemTemplateMod.instance = new DefaultItemTemplateMod();
-        }
-        return DefaultItemTemplateMod.instance;
-    }
-
-    @Override
-    public void configure(Properties properties) {
-        convertToDefault = Arrays.stream(properties.getProperty("convertToDefault", Arrays.toString(convertToDefault)).replaceAll("\\s", "").split(",")).mapToInt(Integer::parseInt).toArray();
-        logger.log(Level.INFO, Arrays.toString(convertToDefault));
+    static {
+        logger = Logger.getLogger(DefaultItemTemplateMod.class.getName());
     }
 
     @Override
@@ -51,37 +34,88 @@ public class DefaultItemTemplateMod implements WurmServerMod, Configurable, Item
     }
 
     private static void addDefaultTemplates() throws NoSuchFieldException, IllegalAccessException, IOException, SQLException {
-        if(convertToDefault.length < 1)
-            return;
-        ArrayList<TemplateDataStructure> toMakeDefaultTemplates = new ArrayList<>();
-        for (int templateID : convertToDefault) {
-            TemplateDataStructure a = searchTemplateID(templateID);
-            TemplateDataStructure b = a == null ? templateFromBulk(templateID) : a;
-            if (b == null) {
-                logger.log(Level.INFO, "Template: " + templateID + " exists as neither stand alone or a bulk item.");
-            }else{
-                logger.log(Level.INFO, b.toString());
-                toMakeDefaultTemplates.add(b);
-            }
-        }
+        // foreach modDbTemplates, does it exists in wurmitems.db and it's missing from ItemTemplateFactory#templates. If so add
+        // a default template to ItemTemplateFactory#templates.
 
+
+        // Another way would be to fetch all templates from Wurm. Compare if a fetched itemDB templateid and realTemplates is
+        // in the Wurm-templates list. If not add it using the data in the item.DB
         ArrayList<Integer> itemTemplateIDs = new ArrayList<>();
         Map<Integer, ItemTemplate> fieldTemplates = ReflectionUtil.getPrivateField(ItemTemplateFactory.class,
                 ReflectionUtil.getField(ItemTemplateFactory.class, "templates"));
-        itemTemplateIDs.addAll(fieldTemplates.keySet());
-        for (int a : convertToDefault) {
-            if (!itemTemplateIDs.contains(a)) {
-                ItemTemplateFactory.getInstance().createItemTemplate(a, 3, "Missing item", "Missing item", "excellent", "good", "ok", "poor",
-                        "No item template matches this item", new short[]{}, (short) 340, (short) 1,
-                        0, Long.MAX_VALUE, 1, 1, 1, -10, MiscConstants.EMPTY_BYTE_PRIMITIVE_ARRAY,
-                        "model.writ.deed.", 200.0f, 1, (byte) 0, 0, false, -1);
-                logger.log(Level.INFO, "added " + a);
-            }
+        fieldTemplates.keySet().forEach(itemTemplateIDs::add);
+        ArrayList<TemplateDataStructure> structures = checkIfPresentInItemDb(itemTemplateIDs);
+        if (structures.size() > 0) {
+            addToWurmTemplates(structures);
         }
     }
 
-    @Nullable
-    private static TemplateDataStructure templateFromBulk(int templateID) throws SQLException{
+    private static void addToWurmTemplates(ArrayList<TemplateDataStructure> structures) throws IOException {
+        for (TemplateDataStructure templateDataStructure:structures){
+            ItemTemplateFactory.getInstance().createItemTemplate(
+                    templateDataStructure.getTemplateID(), 3, "Missing item", "Missing item", "excellent",
+                    "good", "ok", "poor","No item template matches this item",
+                    new short[]{112, 175}, (short) 340, (short) 1,0, Long.MAX_VALUE, templateDataStructure.getSizeX(), templateDataStructure.getSizeY(),
+                    templateDataStructure.getSizeZ(),-10, MiscConstants.EMPTY_BYTE_PRIMITIVE_ARRAY, "model.writ.deed.", 200.0f,
+                    templateDataStructure.getWeight(),
+                    (byte) 0, 0, false, -1);
+            logger.log(Level.INFO, "Added default template for " + templateDataStructure.getTemplateID());
+        }
+    }
+
+    private static ArrayList<TemplateDataStructure> checkIfPresentInItemDb(ArrayList<Integer> itemTemplateIDs) throws SQLException {
+        ArrayList<TemplateDataStructure> toReturn = new ArrayList<>();
+        Connection dbcon = DbConnector.getItemDbCon();
+        PreparedStatement ps = dbcon.prepareStatement("SELECT * FROM ITEMS");
+        ResultSet rs = ps.executeQuery();
+
+        final int[] itemDbTemplateId = new int[]{0};
+        boolean isMissingItemDbTemplate;
+        boolean isAbsentFromMissingTemplates;
+        while (rs.next()) {
+            itemDbTemplateId[0] = rs.getInt("TEMPLATEID");
+            isMissingItemDbTemplate =
+                    itemTemplateIDs.stream()
+                            .filter(value -> Objects.equals(value, itemDbTemplateId[0]))
+                            .count()
+                            == 0;
+            isAbsentFromMissingTemplates = TemplateDataStructure.getDistinctTemplates().stream()
+                    .filter(integer -> integer == itemDbTemplateId[0])
+                    .count() == 0;
+            if (isMissingItemDbTemplate && isAbsentFromMissingTemplates) {
+                // grab information from DB about the missing template and add it to return object
+                toReturn.add(new TemplateDataStructure(
+                        itemDbTemplateId[0], rs.getInt("SIZEX"), rs.getInt("SIZEY"),
+                        rs.getInt("SIZEZ"), rs.getInt("WEIGHT")
+                ));
+            }
+        }
+
+        PreparedStatement ps1 = dbcon.prepareStatement("SELECT * FROM ITEMS where TEMPLATEID=669");
+        ResultSet rs1 = ps1.executeQuery();
+        while (rs1.next()) {
+            itemDbTemplateId[0] = rs1.getInt("REALTEMPLATE");
+            isMissingItemDbTemplate =
+                    itemTemplateIDs.stream()
+                            .filter(value -> Objects.equals(value, itemDbTemplateId[0]))
+                            .count()
+                            == 0;
+            isAbsentFromMissingTemplates = TemplateDataStructure.getDistinctTemplates().stream()
+                    .filter(integer -> integer == itemDbTemplateId[0])
+                    .count() == 0;
+            if (isMissingItemDbTemplate && isAbsentFromMissingTemplates) {
+                // grab information from DB about the missing template and add it to return object
+                toReturn.add(new TemplateDataStructure(itemDbTemplateId[0], rs1.getString("DESCRIPTION"),
+                        rs1.getInt("WEIGHT")));
+            }
+        }
+        DbUtilities.closeDatabaseObjects(ps, rs);
+        DbUtilities.closeDatabaseObjects(ps1, rs1);
+        return toReturn;
+    }
+
+    @Deprecated
+    private static TemplateDataStructure templateFromBulk(int templateID) throws SQLException {
         Connection dbcon = DbConnector.getItemDbCon();
         PreparedStatement ps = dbcon.prepareStatement("SELECT * FROM ITEMS WHERE TEMPLATEID=? AND REALTEMPLATE=?");
         ps.setInt(1, 669);
@@ -91,12 +125,12 @@ public class DefaultItemTemplateMod implements WurmServerMod, Configurable, Item
             DbUtilities.closeDatabaseObjects(ps, rs);
             return null;
         }
-        TemplateDataStructure templateDataStructure = getInstance().new TemplateDataStructure(templateID, rs.getString("DESCRIPTION"), rs.getInt("WEIGHT"));
+        TemplateDataStructure templateDataStructure = new TemplateDataStructure(templateID, rs.getString("DESCRIPTION"), rs.getInt("WEIGHT"));
         DbUtilities.closeDatabaseObjects(ps, rs);
         return templateDataStructure;
     }
 
-    @Nullable
+    @Deprecated
     private static TemplateDataStructure searchTemplateID(int templateID) throws SQLException{
         Connection dbcon = DbConnector.getItemDbCon();
         PreparedStatement ps = dbcon.prepareStatement("SELECT * FROM ITEMS WHERE TEMPLATEID=?");
@@ -106,85 +140,8 @@ public class DefaultItemTemplateMod implements WurmServerMod, Configurable, Item
             DbUtilities.closeDatabaseObjects(ps, rs);
             return null;
         }
-        TemplateDataStructure templateDataStructure = getInstance().new TemplateDataStructure(templateID, rs.getInt("SIZEX"), rs.getInt("SIZEY"), rs.getInt("SIZEZ"), rs.getInt("WEIGHT"));
+        TemplateDataStructure templateDataStructure = new TemplateDataStructure(templateID, rs.getInt("SIZEX"), rs.getInt("SIZEY"), rs.getInt("SIZEZ"), rs.getInt("WEIGHT"));
         DbUtilities.closeDatabaseObjects(ps, rs);
         return templateDataStructure;
-    }
-
-    private class TemplateDataStructure {
-        Integer sizeX;
-        Integer sizeY;
-        Integer sizeZ;
-        Integer weight;
-        Integer templateID;
-
-        TemplateDataStructure(int aTemplateID, int aSizeX, int aSizeY, int aSizeZ, int aWeight) {
-            this.sizeX = aSizeX;
-            this.sizeY = aSizeY;
-            this.sizeZ = aSizeZ;
-            this.weight = aWeight;
-            this.templateID = aTemplateID;
-        }
-
-        TemplateDataStructure(int aTemplateID, String aDescription, int aWeight){
-            this.templateID = aTemplateID;
-            this.deriveXYZ(Integer.parseInt(aDescription.replaceAll("x", ""), 10), aWeight);
-        }
-
-        private void deriveXYZ(int count, int volumeSummed){
-            // 1. find the cube root of single item's volume.
-            int volumeSingle = Math.floorDiv(volumeSummed, count);
-            double cubedReference = Math.cbrt(volumeSingle);
-            // 2. find the first factorial of volume that >= cube value
-            ArrayList<Integer> volumeFactors = integerFactoring(volumeSingle);
-            int zDimension = 1;
-            for (int var: volumeFactors){
-                zDimension = var >= cubedReference ? var : 1;
-                if (zDimension > 1)
-                    break;
-            }
-            this.sizeZ = zDimension;
-            // 3. find the first factorial of volume/#2 result that >= cube value
-            ArrayList<Integer> volumeFactors2 = integerFactoring(volumeSingle/zDimension);
-            int yDimension = 1;
-            for (int var: volumeFactors2){
-                yDimension = var >= cubedReference ? var : 1;
-                if (yDimension > 1)
-                    break;
-            }
-            this.sizeY = yDimension;
-            // 4. whatever factorial completes #3.
-            int xDimension = volumeSingle / zDimension / yDimension;
-            if (volumeSingle % xDimension != 0)
-                //throw new UnsupportedOperationException();
-            this.sizeX = xDimension;
-            this.weight = 20000;
-        }
-
-        @Override @SuppressWarnings("unused")
-        public String toString(){
-            return "templateID: " + templateID + ", sizeX: " + this.sizeX + ", sizeY: " + this.sizeY + ", sizeZ: " + this.sizeZ
-                    + ", weight: " + this.weight;
-        }
-
-        /**
-         * Factoring an integer, n, by this calculator is done by trial division. First find the square root of n and
-         * round it up to the next integer. Let the result equal s.  Test all integers from 1 through s and record all
-         * that are divisible into n.
-         *
-         * @param integer type int.
-         * @return ArrayList of int.
-         */
-        private ArrayList<Integer> integerFactoring(int integer){
-            double s = Math.ceil(Math.sqrt(integer));
-            ArrayList<Integer> factors = new ArrayList<>();
-            for (int ind = 2;ind<=s;ind++){
-                if (s % ind == 0){
-                    factors.add(ind);
-                }
-            }
-            return factors;
-        }
-
     }
 }
