@@ -54,11 +54,11 @@ public class DefaultItemTemplateMod implements WurmServerMod, ItemTemplatesCreat
         for (TemplateDataStructure templateDataStructure:structures){
             ItemTemplateFactory.getInstance().createItemTemplate(
                     templateDataStructure.getTemplateID(), 3, "Missing item", "Missing item", "excellent",
-                    "good", "ok", "poor","No item template matches this item",
+                    "good", "ok", "poor","No item template matches this item.",
                     new short[]{112, 175}, (short) 340, (short) 1,0, Long.MAX_VALUE, templateDataStructure.getSizeX(), templateDataStructure.getSizeY(),
                     templateDataStructure.getSizeZ(),-10, MiscConstants.EMPTY_BYTE_PRIMITIVE_ARRAY, "model.writ.deed.", 200.0f,
                     templateDataStructure.getWeight(),
-                    (byte) 0, 0, false, -1);
+                    (byte) 0, 0, false, -1, 0);
             logger.log(Level.INFO, "Added default template for " + templateDataStructure.getTemplateID());
         }
     }
